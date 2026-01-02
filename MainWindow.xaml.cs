@@ -15,7 +15,7 @@ using ScottPlot.WPF;
 
 namespace DeviceAnalisys_v5
 {
-    //this is my 4th edit
+    //this is my 5th edit project
     public partial class MainWindow : Window
     {
         private ExcelOperation excelOperation = new ExcelOperation();
