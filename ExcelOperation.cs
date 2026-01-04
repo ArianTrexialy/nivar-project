@@ -102,64 +102,112 @@ namespace DeviceAnalisys_v5
         {
             try
             {
+                if (GlobalData.DBList == null || GlobalData.DBList.Count == 0)
+                {
+                    MessageBox.Show("No data available to save.", "No Data",
+                        MessageBoxButton.OK, MessageBoxImage.Information);
+                    return;
+                }
+
                 if (string.IsNullOrEmpty(filePath))
                 {
                     var saveDialog = new Microsoft.Win32.SaveFileDialog
                     {
                         Filter = "Excel Files (*.xlsx)|*.xlsx",
-                        FileName = "TestData_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".xlsx",
+                        FileName = $"TestData_{DateTime.Now:yyyyMMdd_HHmmss}.xlsx",
                         DefaultExt = ".xlsx"
                     };
 
                     if (saveDialog.ShowDialog() != true)
-                        return; 
+                        return;
 
                     filePath = saveDialog.FileName;
                 }
 
                 using (var workbook = new XLWorkbook())
                 {
-                    var ws = workbook.Worksheets.Add("Test Data");
+                    // Group data by TestID (device number)
+                    var groupedData = GlobalData.DBList
+                        .GroupBy(d => d.TestID)
+                        .OrderBy(g => g.Key);
 
-                    ws.Cell(1, 1).Value = "TestID";
-                    ws.Cell(1, 2).Value = "Serial Number";  
-                    ws.Cell(1, 3).Value = "Time";
-                    ws.Cell(1, 4).Value = "SetPoint";
-                    ws.Cell(1, 5).Value = "Actual";
-                    ws.Cell(1, 6).Value = "Pitch";
-                    ws.Cell(1, 7).Value = "Roll";
-
-                    var headerRange = ws.Range("A1:G1");
-                    headerRange.Style.Font.Bold = true;
-                    headerRange.Style.Fill.BackgroundColor = XLColor.FromArgb(0, 122, 204);
-                    headerRange.Style.Font.FontColor = XLColor.White;
-                    headerRange.Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
-
-                    int row = 2;
-                    foreach (var data in GlobalData.DBList)
+                    foreach (var group in groupedData)
                     {
-                        ws.Cell(row, 1).Value = data.TestID;
-                        ws.Cell(row, 2).Value = data.SerialNumber; 
-                        ws.Cell(row, 3).Value = data.Time;
-                        ws.Cell(row, 4).Value = data.SetPoint;
-                        ws.Cell(row, 5).Value = data.Actual;
-                        ws.Cell(row, 6).Value = data.Pitch;
-                        ws.Cell(row, 7).Value = data.Roll;
-                        row++;
+                        int deviceIndex = group.Key - 1;
+                        string sheetName = $"Device_{group.Key}";
+
+                        // Try to use real serial number if available
+                        var firstValidSerial = group
+                            .FirstOrDefault(d => !string.IsNullOrWhiteSpace(d.SerialNumber) &&
+                                                !d.SerialNumber.StartsWith("SN-DEV") &&
+                                                !d.SerialNumber.StartsWith("SN-UNKNOWN"));
+
+                        if (firstValidSerial != null)
+                        {
+                            string cleanSerial = firstValidSerial.SerialNumber.Trim();
+                            // Make sure sheet name is valid (max 31 chars, no invalid chars)
+                            cleanSerial = cleanSerial.Replace("/", "-").Replace("\\", "-").Replace("?", "").Replace("*", "").Replace("[", "(").Replace("]", ")");
+                            sheetName = $"Dev_{group.Key}_{cleanSerial}";
+                            if (sheetName.Length > 31)
+                                sheetName = sheetName.Substring(0, 31);
+                        }
+
+                        var ws = workbook.Worksheets.Add(sheetName);
+
+                        // Write headers
+                        ws.Cell(1, 1).Value = "TestID";
+                        ws.Cell(1, 2).Value = "Serial Number";
+                        ws.Cell(1, 3).Value = "Time";
+                        ws.Cell(1, 4).Value = "SetPoint";
+                        ws.Cell(1, 5).Value = "Actual";
+                        ws.Cell(1, 6).Value = "Pitch";
+                        ws.Cell(1, 7).Value = "Roll";
+
+                        var headerRange = ws.Range("A1:G1");
+                        headerRange.Style.Font.Bold = true;
+                        headerRange.Style.Fill.BackgroundColor = XLColor.FromArgb(0, 122, 204);
+                        headerRange.Style.Font.FontColor = XLColor.White;
+                        headerRange.Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+
+                        // Write data rows
+                        int row = 2;
+                        foreach (var data in group.OrderBy(d => d.Time))
+                        {
+                            ws.Cell(row, 1).Value = data.TestID;
+                            ws.Cell(row, 2).Value = data.SerialNumber;
+                            ws.Cell(row, 3).Value = data.Time;
+                            ws.Cell(row, 4).Value = data.SetPoint;
+                            ws.Cell(row, 5).Value = data.Actual;
+                            ws.Cell(row, 6).Value = data.Pitch;
+                            ws.Cell(row, 7).Value = data.Roll;
+                            row++;
+                        }
+
+                        // Auto adjust columns
+                        ws.Columns("A:G").AdjustToContents();
                     }
 
-                    ws.Columns("A:G").AdjustToContents(); 
+                    // Optional: Summary sheet
+                    var summarySheet = workbook.Worksheets.Add("Summary", 1); // Position as first sheet
+                    summarySheet.Cell(1, 1).Value = "Data Summary";
+                    summarySheet.Cell(2, 1).Value = "Total points";
+                    summarySheet.Cell(2, 2).Value = GlobalData.DBList.Count;
+                    summarySheet.Cell(3, 1).Value = "Number of devices";
+                    summarySheet.Cell(3, 2).Value = groupedData.Count();
+                    summarySheet.Cell(5, 1).Value = "Generated at";
+                    summarySheet.Cell(5, 2).Value = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                    summarySheet.Columns("A:B").AdjustToContents();
 
                     workbook.SaveAs(filePath);
-
-                    MessageBox.Show($"Data successfully saved to Excel!\n{filePath}",
-                                    "Save Completed", MessageBoxButton.OK, MessageBoxImage.Information);
                 }
+
+                MessageBox.Show($"Data successfully saved!\n{filePath}\nEach device is saved in its own sheet.",
+                    "Save Completed", MessageBoxButton.OK, MessageBoxImage.Information);
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error saving to Excel:\n{ex.Message}",
-                                "Save Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show($"Error while saving Excel file:\n{ex.Message}",
+                    "Save Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
     }
