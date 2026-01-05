@@ -224,11 +224,9 @@ namespace DeviceAnalisys_v5
                 loggerLists[i][2].IsVisible = false; // Pitch hidden by default
                 loggerLists[i][3].IsVisible = false; // Roll hidden by default
             }
-
-            plotTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(2000) };
+            plotTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
             plotTimer.Tick += PlotTimer_Tick;
             plotTimer.Start();
-
             cmbFps.SelectionChanged += cmbFps_SelectionChanged;
         }
 
@@ -317,10 +315,37 @@ namespace DeviceAnalisys_v5
 
             // Check if loading from Excel/queue is finished
             // (no new data processed AND queue is empty AND we have some points)
+            // فقط یک بار وقتی لود تمام شد، عنوان پلات‌ها رو آپدیت کن
             if (!updated && GlobalData.DiagramQueue.IsEmpty && totalPoints > 0)
             {
                 statusText.Text = $"Finished loading | Total Points: {totalPoints}";
-                statusText.Foreground = new SolidColorBrush(System.Windows.Media.Colors.LimeGreen); // Green to indicate success
+                statusText.Foreground = new SolidColorBrush(System.Windows.Media.Colors.LimeGreen);
+
+                // آپدیت عنوان‌ها بر اساس سریال واقعی در داده‌ها
+                bool titlesUpdated = false;
+                for (int i = 0; i < deviceCount; i++)
+                {
+                    int testId = i + 1;
+                    var anyData = GlobalData.DBList
+                        .FirstOrDefault(d => d.TestID == testId && !string.IsNullOrWhiteSpace(d.SerialNumber));
+
+                    if (anyData != null)
+                    {
+                        string realSerial = anyData.SerialNumber.Trim();
+                        if (deviceSerialNumbers[i] != realSerial)
+                        {
+                            deviceSerialNumbers[i] = realSerial;
+                            plots[i].Plot.Axes.Title.Label.Text = $"Device {i + 1} - {realSerial}";
+                            plots[i].Refresh();
+                            titlesUpdated = true;
+                        }
+                    }
+                }
+
+                if (titlesUpdated)
+                {
+                    CurrentDeviceSerials = (string[])deviceSerialNumbers.Clone();
+                }
             }
         }
 
@@ -540,23 +565,28 @@ namespace DeviceAnalisys_v5
                 await LoadExcelToQueueGraduallyAsync(dialog.FileName);
 
                 // Update plot titles with found serial numbers
+                // به‌روزرسانی عنوان پلات‌ها بر اساس سریال واقعی موجود در داده‌های لود شده
                 for (int i = 0; i < deviceCount; i++)
                 {
                     int testId = i + 1;
-                    var lastValid = GlobalData.DBList
+
+                    // آخرین داده این دستگاه رو پیدا کن
+                    var lastData = GlobalData.DBList
                         .Where(d => d.TestID == testId)
                         .OrderByDescending(d => d.Time)
-                        .FirstOrDefault(d => !string.IsNullOrWhiteSpace(d.SerialNumber) &&
-                                             !d.SerialNumber.StartsWith("SN-DEV") &&
-                                             !d.SerialNumber.StartsWith("SN-UNKNOWN"));
+                        .FirstOrDefault();
 
-                    if (lastValid != null)
+                    string serialToUse = deviceSerialNumbers[i]; // fallback به پیش‌فرض (SN-DEV00x)
+
+                    if (lastData != null && !string.IsNullOrWhiteSpace(lastData.SerialNumber))
                     {
-                        deviceSerialNumbers[i] = lastValid.SerialNumber.Trim();
+                        serialToUse = lastData.SerialNumber.Trim();
                     }
 
-                    plots[i].Plot.Axes.Title.Label.Text = $"Device {i + 1} - {deviceSerialNumbers[i]}";
-                    plots[i].Plot.Axes.AutoScale();
+                    // آپدیت آرایه اصلی و عنوان پلات
+                    deviceSerialNumbers[i] = serialToUse;
+                    plots[i].Plot.Axes.Title.Label.Text = $"Device {i + 1} - {serialToUse}";
+                    plots[i].Plot.Axes.AutoScale(); // اختیاری اما خوبه
                     plots[i].Refresh();
                 }
 
@@ -594,8 +624,7 @@ namespace DeviceAnalisys_v5
 
                     foreach (var worksheet in workbook.Worksheets)
                     {
-                        if (worksheet.Name == "Summary" ||
-                            !worksheet.Name.StartsWith("Device_"))
+                        if (worksheet.Name == "Summary" || (!worksheet.Name.StartsWith("Device_") && !worksheet.Name.StartsWith("Dev_")))
                             continue;
 
                         string deviceKey = worksheet.Name;

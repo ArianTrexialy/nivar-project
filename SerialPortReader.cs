@@ -69,7 +69,6 @@ namespace DeviceAnalisys_v5
                         Roll = NormalizeValue(Uval2)
                     };
                     GlobalData.DiagramQueue.Enqueue(data);
-                    // حذف این خط: GlobalData.DBList.Add(data);  // چون duplicate میشه و سریال ست نشده
                 }
                 _timeIndex++;
                 _buffer.RemoveRange(0, 32);
