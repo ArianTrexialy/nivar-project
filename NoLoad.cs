@@ -25,8 +25,8 @@ namespace DeviceAnalisys_v5
             AnalyzeBacklash(deviceData, report);
             AnalyzeStepResponse(deviceData, report);
 
-            string outputFile = $"NoLoad_Report_Device{deviceIndex}_{DateTime.Now:yyyyMMdd_HHmmss}.txt";
-            File.WriteAllText(outputFile, report.ToString());
+            //string outputFile = $"NoLoad_Report_Device{deviceIndex}_{DateTime.Now:yyyyMMdd_HHmmss}.txt";
+            //File.WriteAllText(outputFile, report.ToString());
 
             return report.ToString();
         }
