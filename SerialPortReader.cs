@@ -5,6 +5,8 @@ using System.IO.Ports;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using System.Windows.Threading;
+using System.Windows;
 
 namespace DeviceAnalisys_v5
 {
@@ -35,7 +37,7 @@ namespace DeviceAnalisys_v5
         {
             if (_port.IsOpen) _port.Close();
             _buffer.Clear();
-            _timeIndex = 0; 
+            _timeIndex = 0;
         }
         private void Port_DataReceived(object sender, SerialDataReceivedEventArgs e)
         {
@@ -55,30 +57,41 @@ namespace DeviceAnalisys_v5
                 for (int i = 0; i < 4; i++)
                 {
                     int offset = i * 8;
-                    ushort USetPoint = (ushort)((_buffer[offset + 0]) | _buffer[offset + 1] << 8);
-                    ushort UActual = (ushort)((_buffer[offset + 2]) | _buffer[offset + 3] << 8);
-                    ushort Uval1 = (ushort)((_buffer[offset + 4]) | _buffer[offset + 5] << 8);
-                    ushort Uval2 = (ushort)((_buffer[offset + 6]) | _buffer[offset + 7] << 8);
-                    DeviceData data = new DeviceData
+                    ushort uSetPoint = (ushort)((_buffer[offset + 0]) | _buffer[offset + 1] << 8);
+                    ushort uActual = (ushort)((_buffer[offset + 2]) | _buffer[offset + 3] << 8);
+                    ushort uPitch = (ushort)((_buffer[offset + 4]) | _buffer[offset + 5] << 8);
+                    ushort uRoll = (ushort)((_buffer[offset + 6]) | _buffer[offset + 7] << 8);
+
+                    double Normalize(ushort u)
+                    {
+                        double v = u;
+                        if (v > 32767) v = 32768 - v;
+                        return v;
+                    }
+
+                    var data = new DeviceData
                     {
                         TestID = i + 1,
                         Time = _timeIndex,
-                        SetPoint = NormalizeValue(USetPoint),
-                        Actual = NormalizeValue(UActual),
-                        Pitch = NormalizeValue(Uval1),
-                        Roll = NormalizeValue(Uval2)
+                        SetPointRaw = Normalize(uSetPoint),
+                        ActualRaw = Normalize(uActual),
+                        PitchRaw = Normalize(uPitch),
+                        RollRaw = Normalize(uRoll),
+                        SetPointDeg = Normalize(uSetPoint) / GlobalData.Scale,
+                        ActualDeg = Normalize(uActual) / GlobalData.Scale,
+                        PitchDeg = Normalize(uPitch) / GlobalData.Scale,
+                        RollDeg = Normalize(uRoll) / GlobalData.Scale
                     };
-                    GlobalData.DiagramQueue.Enqueue(data);
+
+                    Application.Current.Dispatcher.Invoke(() =>
+                    {
+                        GlobalData.DBList.Add(data);
+                    });
                 }
+
                 _timeIndex++;
                 _buffer.RemoveRange(0, 32);
             }
-        }
-        double NormalizeValue(ushort value)
-        {
-            double val = value;
-            if (val > 32767) val = 32768 - val;
-            return val / 1000.0;
         }
         public void SendCommand(string command)
         {

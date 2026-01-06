@@ -1,12 +1,13 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.IO.Ports;
 using System.Linq;
 using System.Threading.Tasks;
+using System.IO.Ports;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using Microsoft.Win32;
 using ScottPlot;
@@ -14,7 +15,8 @@ using ScottPlot.Plottables;
 using ScottPlot.WPF;
 using ClosedXML.Excel;
 using System.Threading;
-using System.Windows.Media.Animation;
+using System.Text;
+using System.IO;
 
 namespace DeviceAnalisys_v5
 {
@@ -23,26 +25,22 @@ namespace DeviceAnalisys_v5
         private readonly ExcelOperation excelOperation = new ExcelOperation();
         private SerialPortReader serialPortReader;
         private DispatcherTimer plotTimer;
-
         private readonly int deviceCount = 4;
         private readonly string[] parameters = { "SetPoint", "Actual", "Pitch", "Roll" };
-
         private List<DataLogger>[] loggerLists;
         private Marker[] highlightMarkers;
         private WpfPlot[] plots;
         private TextBlock[] liveValueTexts;
-
         private string[] deviceSerialNumbers = new string[4];
         public static string[] CurrentDeviceSerials { get; private set; } = new string[4];
-
         private bool isPaused = false;
         private int totalPoints = 0;
         private double lastTimeIndex = -1;
+        private int lastProcessedIndex = 0;
 
         // Track fullscreen and HD modes separately
         private int? fullScreenDevice = null;
         private int? hdModeDevice = null;
-
         private ColumnDefinition leftPanelColumn;
 
         public MainWindow()
@@ -59,7 +57,6 @@ namespace DeviceAnalisys_v5
             deviceSerialNumbers[1] = "SN-DEV002";
             deviceSerialNumbers[2] = "SN-DEV003";
             deviceSerialNumbers[3] = "SN-DEV004";
-
             CurrentDeviceSerials = (string[])deviceSerialNumbers.Clone();
         }
 
@@ -157,7 +154,6 @@ namespace DeviceAnalisys_v5
             plots = new WpfPlot[] { plot0, plot1, plot2, plot3 };
             loggerLists = new List<DataLogger>[deviceCount];
             highlightMarkers = new Marker[deviceCount];
-
             liveValueTexts = new TextBlock[]
             {
                 valSetPoint0, valActual0, valPitch0, valRoll0,
@@ -173,25 +169,20 @@ namespace DeviceAnalisys_v5
                 var plt = plots[i].Plot;
                 plt.FigureBackground.Color = ScottPlot.Color.FromHex("#1E1E1E");
                 plt.DataBackground.Color = ScottPlot.Color.FromHex("#1E1E1E");
-
                 plt.Axes.Title.Label.Text = $"Device {i + 1} - {deviceSerialNumbers[i]}";
                 plt.Axes.Title.Label.ForeColor = ScottPlot.Colors.White;
                 plt.Axes.Title.Label.FontSize = 16;
-
                 plt.Axes.Bottom.Label.Text = "Index";
                 plt.Axes.Left.Label.Text = "Value";
-
                 plt.Legend.IsVisible = true;
                 plt.Legend.Alignment = Alignment.UpperRight;
                 plt.Legend.FontSize = 12;
-
                 plots[i].Menu = null;
 
                 plt.Axes.Bottom.Label.ForeColor = ScottPlot.Colors.White;
                 plt.Axes.Left.Label.ForeColor = ScottPlot.Colors.White;
                 plt.Axes.Bottom.TickLabelStyle.ForeColor = ScottPlot.Colors.White;
                 plt.Axes.Left.TickLabelStyle.ForeColor = ScottPlot.Colors.White;
-
                 plt.Axes.Bottom.TickLabelStyle.FontSize = 11;
                 plt.Axes.Left.TickLabelStyle.FontSize = 11;
 
@@ -224,80 +215,69 @@ namespace DeviceAnalisys_v5
                 loggerLists[i][2].IsVisible = false; // Pitch hidden by default
                 loggerLists[i][3].IsVisible = false; // Roll hidden by default
             }
+
             plotTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
             plotTimer.Tick += PlotTimer_Tick;
             plotTimer.Start();
+
             cmbFps.SelectionChanged += cmbFps_SelectionChanged;
         }
 
         private void PlotTimer_Tick(object sender, EventArgs e)
         {
-            // Skip processing if plotting is paused
             if (isPaused) return;
 
-            // Constants for batch processing and maximum points per plot
-            const int MAX_PER_TICK = 1500;
-            const int MAX_POINTS_PER_PLOT = 35000;
+            int start = lastProcessedIndex;
+            int count = GlobalData.DBList.Count - start;
+            if (count <= 0) return;
 
             bool updated = false;
             var updatedPlots = new HashSet<int>();
             double currentMaxTime = lastTimeIndex;
-            int processed = 0;
 
-            // Process data from the queue in batches
-            while (processed < MAX_PER_TICK && GlobalData.DiagramQueue.TryDequeue(out DeviceData data))
+            for (int k = 0; k < count; k++)
             {
+                var data = GlobalData.DBList[start + k];
                 int deviceIndex = data.TestID - 1;
                 if (deviceIndex < 0 || deviceIndex >= deviceCount) continue;
 
-                // Fallback for missing or invalid serial number
-                if (string.IsNullOrWhiteSpace(data.SerialNumber) ||
-                    data.SerialNumber.StartsWith("SN-DEV") ||
-                    data.SerialNumber.StartsWith("SN-UNKNOWN") ||
-                    data.SerialNumber == $"SN-DEV{data.TestID:D3}")
+                // Update serial number if necessary
+                if (string.IsNullOrWhiteSpace(data.SerialNumber) || data.SerialNumber.StartsWith("SN-DEV"))
                 {
                     data.SerialNumber = deviceSerialNumbers[deviceIndex];
                 }
 
-                // Store data in global list
-                GlobalData.DBList.Add(data);
-
-                // Add data to corresponding plot loggers
                 var loggerList = loggerLists[deviceIndex];
-                loggerList[0].Add(data.Time, data.SetPoint);
-                loggerList[1].Add(data.Time, data.Actual);
-                loggerList[2].Add(data.Time, data.Pitch);
-                loggerList[3].Add(data.Time, data.Roll);
 
-                // Trim old points if exceeding maximum limit (to prevent memory issues)
-                foreach (var logger in loggerList)
-                {
-                    if (logger.Data.Coordinates.Count > MAX_POINTS_PER_PLOT)
-                    {
-                        int excess = logger.Data.Coordinates.Count - MAX_POINTS_PER_PLOT;
-                        logger.Data.Coordinates.RemoveRange(0, excess);
-                    }
-                }
+                // Add data to plot (no removal – all data stays)
+                loggerList[0].Add(data.Time, data.SetPointDeg);
+                loggerList[1].Add(data.Time, data.ActualDeg);
+                loggerList[2].Add(data.Time, data.PitchDeg);
+                loggerList[3].Add(data.Time, data.RollDeg);
 
-                // Update live value displays for this device
+                // Update live values
                 int baseIndex = deviceIndex * 4;
-                liveValueTexts[baseIndex + 0].Text = $"SetPoint: {data.SetPoint:F3}";
-                liveValueTexts[baseIndex + 1].Text = $"Actual: {data.Actual:F3}";
-                liveValueTexts[baseIndex + 2].Text = $"Pitch: {data.Pitch:F3}";
-                liveValueTexts[baseIndex + 3].Text = $"Roll: {data.Roll:F3}";
+                liveValueTexts[baseIndex + 0].Text = $"SetPoint: {data.SetPointDeg:F3}";
+                liveValueTexts[baseIndex + 1].Text = $"Actual: {data.ActualDeg:F3}";
+                liveValueTexts[baseIndex + 2].Text = $"Pitch: {data.PitchDeg:F3}";
+                liveValueTexts[baseIndex + 3].Text = $"Roll: {data.RollDeg:F3}";
 
-                totalPoints++;
                 updated = true;
                 updatedPlots.Add(deviceIndex);
 
-                // Update the latest time index
-                if (data.Time > currentMaxTime)
-                    currentMaxTime = data.Time;
-
-                processed++;
+                if (data.Time > currentMaxTime) currentMaxTime = data.Time;
             }
 
-            // Refresh UI if any new data was processed
+            lastProcessedIndex += count;
+            totalPoints += count;
+
+            livePointsText.Text = totalPoints.ToString("N0");
+            liveLastUpdate.Text = currentMaxTime.ToString("F0");
+            lastTimeIndex = currentMaxTime;
+
+            // Update status bar
+            statusText.Text = $"Running | Points: {totalPoints:N0} | Plotted: {lastProcessedIndex:N0}/{GlobalData.DBList.Count:N0}";
+
             if (updated)
             {
                 foreach (int index in updatedPlots)
@@ -305,54 +285,43 @@ namespace DeviceAnalisys_v5
                     plots[index].Plot.Axes.AutoScale();
                     plots[index].Refresh();
                 }
-
-                livePointsText.Text = totalPoints.ToString();
-                liveLastUpdate.Text = currentMaxTime.ToString("F0");
-                lastTimeIndex = currentMaxTime;
-
-                statusText.Text = $"Running | Points: {totalPoints}";
             }
 
-            // Check if loading from Excel/queue is finished
-            // (no new data processed AND queue is empty AND we have some points)
-            // فقط یک بار وقتی لود تمام شد، عنوان پلات‌ها رو آپدیت کن
-            if (!updated && GlobalData.DiagramQueue.IsEmpty && totalPoints > 0)
+            // Update device titles if serial changed
+            bool titlesUpdated = false;
+            for (int i = 0; i < deviceCount; i++)
             {
-                statusText.Text = $"Finished loading | Total Points: {totalPoints}";
-                statusText.Foreground = new SolidColorBrush(System.Windows.Media.Colors.LimeGreen);
-
-                // آپدیت عنوان‌ها بر اساس سریال واقعی در داده‌ها
-                bool titlesUpdated = false;
-                for (int i = 0; i < deviceCount; i++)
+                int testId = i + 1;
+                var anyData = GlobalData.DBList.FirstOrDefault(d => d.TestID == testId && !string.IsNullOrWhiteSpace(d.SerialNumber));
+                if (anyData != null)
                 {
-                    int testId = i + 1;
-                    var anyData = GlobalData.DBList
-                        .FirstOrDefault(d => d.TestID == testId && !string.IsNullOrWhiteSpace(d.SerialNumber));
-
-                    if (anyData != null)
+                    string realSerial = anyData.SerialNumber.Trim();
+                    if (deviceSerialNumbers[i] != realSerial)
                     {
-                        string realSerial = anyData.SerialNumber.Trim();
-                        if (deviceSerialNumbers[i] != realSerial)
-                        {
-                            deviceSerialNumbers[i] = realSerial;
-                            plots[i].Plot.Axes.Title.Label.Text = $"Device {i + 1} - {realSerial}";
-                            plots[i].Refresh();
-                            titlesUpdated = true;
-                        }
+                        deviceSerialNumbers[i] = realSerial;
+                        plots[i].Plot.Axes.Title.Label.Text = $"Device {i + 1} - {realSerial}";
+                        plots[i].Refresh();
+                        titlesUpdated = true;
                     }
                 }
-
-                if (titlesUpdated)
-                {
-                    CurrentDeviceSerials = (string[])deviceSerialNumbers.Clone();
-                }
+            }
+            if (titlesUpdated)
+            {
+                CurrentDeviceSerials = (string[])deviceSerialNumbers.Clone();
+            }
+            if (lastProcessedIndex >= GlobalData.DBList.Count)
+            {
+                statusText.Text = $"Plot finished | Total points: {totalPoints:N0}";
+            }
+            else
+            {
+                statusText.Text = $"Plotting... {lastProcessedIndex:N0}/{GlobalData.DBList.Count:N0} points";
             }
         }
 
         private void WpfPlot_MouseMove(object sender, MouseEventArgs e)
         {
             if (!(sender is WpfPlot wpfPlot)) return;
-
             int plotIndex = Array.IndexOf(plots, wpfPlot);
             if (plotIndex < 0) return;
 
@@ -417,18 +386,15 @@ namespace DeviceAnalisys_v5
         private void WpfPlot_MouseLeave(object sender, MouseEventArgs e)
         {
             if (!(sender is WpfPlot wpfPlot)) return;
-
             int plotIndex = Array.IndexOf(plots, wpfPlot);
             if (plotIndex < 0) return;
 
             var plt = wpfPlot.Plot;
-
             plt.Axes.Title.Label.Text = $"Device {plotIndex + 1} - {deviceSerialNumbers[plotIndex]}";
             plt.Axes.Title.Label.ForeColor = ScottPlot.Colors.White;
             plt.Axes.Title.Label.FontSize = 14;
 
             highlightMarkers[plotIndex].IsVisible = false;
-
             wpfPlot.Refresh();
         }
 
@@ -465,12 +431,11 @@ namespace DeviceAnalisys_v5
 
         private async void ClearAll_Click(object sender, RoutedEventArgs e)
         {
-            // Step 1: Disable button during animation & clear
+            // Disable button during animation & clear
             if (sender is Button clearButton)
             {
-                clearButton.IsEnabled = false; // جلوگیری از کلیک چندباره
+                clearButton.IsEnabled = false;
 
-                // Animation: Scale up + slight fade
                 var scaleTransform = new ScaleTransform(1, 1);
                 var opacityAnim = new DoubleAnimation
                 {
@@ -479,7 +444,6 @@ namespace DeviceAnalisys_v5
                     Duration = new Duration(TimeSpan.FromMilliseconds(150)),
                     AutoReverse = true
                 };
-
                 var scaleAnim = new DoubleAnimation
                 {
                     From = 1.0,
@@ -495,10 +459,10 @@ namespace DeviceAnalisys_v5
                 scaleTransform.BeginAnimation(ScaleTransform.ScaleYProperty, scaleAnim);
                 clearButton.BeginAnimation(UIElement.OpacityProperty, opacityAnim);
 
-                await Task.Delay(300); // صبر تا انیمیشن تموم بشه
+                await Task.Delay(300);
             }
 
-            // Step 2: Clear everything (your original code + full reset)
+            // Clear everything
             foreach (var loggerList in loggerLists)
             {
                 foreach (var logger in loggerList)
@@ -509,10 +473,9 @@ namespace DeviceAnalisys_v5
 
             totalPoints = 0;
             lastTimeIndex = -1;
+            lastProcessedIndex = 0;
 
-            // Full memory reset (very important!)
             GlobalData.DBList.Clear();
-            while (GlobalData.DiagramQueue.TryDequeue(out _)) { } // Empty the queue
 
             statusText.Text = "Cleared | Ready for new test | Points: 0";
             statusText.Foreground = new SolidColorBrush(System.Windows.Media.Colors.LimeGreen);
@@ -537,7 +500,6 @@ namespace DeviceAnalisys_v5
             txtTestStatus.Text = "Test Status: Idle";
             txtTestStatus.Foreground = new SolidColorBrush(System.Windows.Media.Colors.LightGray);
 
-            // Re-enable button after animation & clear
             if (sender is Button btn)
             {
                 btn.IsEnabled = true;
@@ -557,46 +519,123 @@ namespace DeviceAnalisys_v5
 
             if (dialog.ShowDialog() != true) return;
 
-            statusText.Text = "Loading Excel file... (will plot gradually)";
+            statusText.Text = "Loading Excel file...";
             Mouse.OverrideCursor = Cursors.Wait;
 
             try
             {
-                await LoadExcelToQueueGraduallyAsync(dialog.FileName);
+                var allData = new List<DeviceData>();
 
-                // Update plot titles with found serial numbers
-                // به‌روزرسانی عنوان پلات‌ها بر اساس سریال واقعی موجود در داده‌های لود شده
-                for (int i = 0; i < deviceCount; i++)
+                using (var workbook = new XLWorkbook(dialog.FileName))
                 {
-                    int testId = i + 1;
+                    int totalProcessed = 0;
+                    int totalRowsExpected = 0;
 
-                    // آخرین داده این دستگاه رو پیدا کن
-                    var lastData = GlobalData.DBList
-                        .Where(d => d.TestID == testId)
-                        .OrderByDescending(d => d.Time)
-                        .FirstOrDefault();
-
-                    string serialToUse = deviceSerialNumbers[i]; // fallback به پیش‌فرض (SN-DEV00x)
-
-                    if (lastData != null && !string.IsNullOrWhiteSpace(lastData.SerialNumber))
+                    foreach (var worksheet in workbook.Worksheets)
                     {
-                        serialToUse = lastData.SerialNumber.Trim();
+                        if (worksheet.Name == "Summary" ||
+                            (!worksheet.Name.StartsWith("Device_") && !worksheet.Name.StartsWith("Dev_")))
+                            continue;
+
+                        totalRowsExpected += (worksheet.LastRowUsed()?.RowNumber() ?? 0) - 1;
                     }
 
-                    // آپدیت آرایه اصلی و عنوان پلات
-                    deviceSerialNumbers[i] = serialToUse;
-                    plots[i].Plot.Axes.Title.Label.Text = $"Device {i + 1} - {serialToUse}";
-                    plots[i].Plot.Axes.AutoScale(); // اختیاری اما خوبه
-                    plots[i].Refresh();
+                    foreach (var worksheet in workbook.Worksheets)
+                    {
+                        if (worksheet.Name == "Summary" ||
+                            (!worksheet.Name.StartsWith("Device_") && !worksheet.Name.StartsWith("Dev_")))
+                            continue;
+
+                        int columnCount = worksheet.Row(1).CellsUsed().Count();
+                        int totalRows = worksheet.LastRowUsed()?.RowNumber() ?? 0;
+
+                        for (int row = 2; row <= totalRows; row++)
+                        {
+                            if (worksheet.Cell(row, 1).IsEmpty()) continue;
+                            if (!worksheet.Cell(row, 1).TryGetValue(out int testId)) continue;
+
+                            string serialNumber = string.Empty;
+                            int time = 0;
+                            double setPointRaw = 0, actualRaw = 0, pitchRaw = 0, rollRaw = 0;
+                            double setPointDeg = 0, actualDeg = 0, pitchDeg = 0, rollDeg = 0;
+
+                            worksheet.Cell(row, 2).TryGetValue(out serialNumber);
+                            worksheet.Cell(row, 3).TryGetValue(out time);
+
+                            if (columnCount >= 11)
+                            {
+                                worksheet.Cell(row, 4).TryGetValue(out setPointRaw);
+                                worksheet.Cell(row, 5).TryGetValue(out actualRaw);
+                                worksheet.Cell(row, 6).TryGetValue(out pitchRaw);
+                                worksheet.Cell(row, 7).TryGetValue(out rollRaw);
+                                worksheet.Cell(row, 8).TryGetValue(out setPointDeg);
+                                worksheet.Cell(row, 9).TryGetValue(out actualDeg);
+                                worksheet.Cell(row, 10).TryGetValue(out pitchDeg);
+                                worksheet.Cell(row, 11).TryGetValue(out rollDeg);
+                            }
+                            else
+                            {
+                                worksheet.Cell(row, 4).TryGetValue(out setPointDeg);
+                                worksheet.Cell(row, 5).TryGetValue(out actualDeg);
+                                worksheet.Cell(row, 6).TryGetValue(out pitchDeg);
+                                worksheet.Cell(row, 7).TryGetValue(out rollDeg);
+                                setPointRaw = setPointDeg * GlobalData.Scale;
+                                actualRaw = actualDeg * GlobalData.Scale;
+                                pitchRaw = pitchDeg * GlobalData.Scale;
+                                rollRaw = rollDeg * GlobalData.Scale;
+                            }
+
+                            var data = new DeviceData
+                            {
+                                TestID = testId,
+                                Time = time,
+                                SetPointRaw = setPointRaw,
+                                ActualRaw = actualRaw,
+                                PitchRaw = pitchRaw,
+                                RollRaw = rollRaw,
+                                SetPointDeg = setPointDeg,
+                                ActualDeg = actualDeg,
+                                PitchDeg = pitchDeg,
+                                RollDeg = rollDeg,
+                                SerialNumber = string.IsNullOrWhiteSpace(serialNumber) ? "" : serialNumber.Trim()
+                            };
+
+                            int devIndex = testId - 1;
+                            if (string.IsNullOrWhiteSpace(data.SerialNumber) ||
+                                data.SerialNumber.StartsWith("SN-DEV") ||
+                                data.SerialNumber.StartsWith("SN-UNKNOWN"))
+                            {
+                                if (devIndex >= 0 && devIndex < CurrentDeviceSerials.Length)
+                                {
+                                    data.SerialNumber = CurrentDeviceSerials[devIndex];
+                                }
+                            }
+
+                            allData.Add(data);
+                            totalProcessed++;
+
+                            statusText.Text = $"Loading from Excel... {totalProcessed:N0}/{totalRowsExpected:N0} points loaded";
+                        }
+                    }
                 }
 
-                CurrentDeviceSerials = (string[])deviceSerialNumbers.Clone();
+                allData.Sort((a, b) =>
+                {
+                    int timeCmp = a.Time.CompareTo(b.Time);
+                    return timeCmp != 0 ? timeCmp : a.TestID.CompareTo(b.TestID);
+                });
 
-                statusText.Text = $"Successfully loaded - {GlobalData.DBList.Count:N0} points (plotting gradually)";
+                GlobalData.DBList.AddRange(allData);
+
+                lastProcessedIndex = 0;
+                totalPoints = 0;
+                lastTimeIndex = -1;
+
+                statusText.Text = $"Excel loaded ({allData.Count:N0} points) – Plotting gradually...";
 
                 if (isPaused)
                 {
-                    PauseResume_Click(null, null);
+                    PauseResume_Click(null, null); // Resume if paused
                 }
             }
             catch (Exception ex)
@@ -624,12 +663,13 @@ namespace DeviceAnalisys_v5
 
                     foreach (var worksheet in workbook.Worksheets)
                     {
-                        if (worksheet.Name == "Summary" || (!worksheet.Name.StartsWith("Device_") && !worksheet.Name.StartsWith("Dev_")))
+                        if (worksheet.Name == "Summary" ||
+                            (!worksheet.Name.StartsWith("Device_") && !worksheet.Name.StartsWith("Dev_")))
                             continue;
 
-                        string deviceKey = worksheet.Name;
-                        int totalRowsThisSheet = worksheet.LastRowUsed()?.RowNumber() ?? 0;
+                        int columnCount = worksheet.Row(1).CellsUsed().Count();
 
+                        int totalRowsThisSheet = worksheet.LastRowUsed()?.RowNumber() ?? 0;
                         int currentRow = 2;
 
                         while (currentRow <= totalRowsThisSheet)
@@ -639,44 +679,70 @@ namespace DeviceAnalisys_v5
                             for (int i = 0; i < rowsThisChunk; i++)
                             {
                                 int row = currentRow + i;
+                                if (worksheet.Cell(row, 1).IsEmpty()) break;
 
-                                if (worksheet.Cell(row, 1).IsEmpty())
-                                    break;
-
-                                if (!worksheet.Cell(row, 1).TryGetValue(out int testId))
-                                    continue;
+                                if (!worksheet.Cell(row, 1).TryGetValue(out int testId)) continue;
 
                                 string serialNumber = string.Empty;
                                 int time = 0;
-                                double setPoint = 0, actual = 0, pitch = 0, roll = 0;
+
+                                double setPointRaw = 0, actualRaw = 0, pitchRaw = 0, rollRaw = 0;
+                                double setPointDeg = 0, actualDeg = 0, pitchDeg = 0, rollDeg = 0;
 
                                 worksheet.Cell(row, 2).TryGetValue(out serialNumber);
                                 worksheet.Cell(row, 3).TryGetValue(out time);
-                                worksheet.Cell(row, 4).TryGetValue(out setPoint);
-                                worksheet.Cell(row, 5).TryGetValue(out actual);
-                                worksheet.Cell(row, 6).TryGetValue(out pitch);
-                                worksheet.Cell(row, 7).TryGetValue(out roll);
+
+                                if (columnCount >= 11)
+                                {
+                                    // New format: Raw + Deg
+                                    worksheet.Cell(row, 4).TryGetValue(out setPointRaw);
+                                    worksheet.Cell(row, 5).TryGetValue(out actualRaw);
+                                    worksheet.Cell(row, 6).TryGetValue(out pitchRaw);
+                                    worksheet.Cell(row, 7).TryGetValue(out rollRaw);
+                                    worksheet.Cell(row, 8).TryGetValue(out setPointDeg);
+                                    worksheet.Cell(row, 9).TryGetValue(out actualDeg);
+                                    worksheet.Cell(row, 10).TryGetValue(out pitchDeg);
+                                    worksheet.Cell(row, 11).TryGetValue(out rollDeg);
+                                }
+                                else
+                                {
+                                    // Old format: only Deg
+                                    worksheet.Cell(row, 4).TryGetValue(out setPointDeg);
+                                    worksheet.Cell(row, 5).TryGetValue(out actualDeg);
+                                    worksheet.Cell(row, 6).TryGetValue(out pitchDeg);
+                                    worksheet.Cell(row, 7).TryGetValue(out rollDeg);
+
+                                    setPointRaw = setPointDeg * GlobalData.Scale;
+                                    actualRaw = actualDeg * GlobalData.Scale;
+                                    pitchRaw = pitchDeg * GlobalData.Scale;
+                                    rollRaw = rollDeg * GlobalData.Scale;
+                                }
 
                                 var data = new DeviceData
                                 {
                                     TestID = testId,
                                     Time = time,
-                                    SetPoint = setPoint,
-                                    Actual = actual,
-                                    Pitch = pitch,
-                                    Roll = roll,
-                                    SerialNumber = string.IsNullOrWhiteSpace(serialNumber)
-                                        ? deviceKey.Replace("Device_", "SN-DEV")
-                                        : serialNumber.Trim()
+                                    SetPointRaw = setPointRaw,
+                                    ActualRaw = actualRaw,
+                                    PitchRaw = pitchRaw,
+                                    RollRaw = rollRaw,
+                                    SetPointDeg = setPointDeg,
+                                    ActualDeg = actualDeg,
+                                    PitchDeg = pitchDeg,
+                                    RollDeg = rollDeg,
+                                    SerialNumber = string.IsNullOrWhiteSpace(serialNumber) ? "" : serialNumber.Trim()
                                 };
 
+                                // Fallback for serial number
+                                int devIndex = testId - 1;
                                 if (string.IsNullOrWhiteSpace(data.SerialNumber) ||
                                     data.SerialNumber.StartsWith("SN-DEV") ||
                                     data.SerialNumber.StartsWith("SN-UNKNOWN"))
                                 {
-                                    int devIndex = testId - 1;
                                     if (devIndex >= 0 && devIndex < CurrentDeviceSerials.Length)
+                                    {
                                         data.SerialNumber = CurrentDeviceSerials[devIndex];
+                                    }
                                 }
 
                                 allData.Add(data);
@@ -694,21 +760,17 @@ namespace DeviceAnalisys_v5
                         }
                     }
 
-                    // Final sort: by TestID then Time
+                    // Global sort: primarily by Time, secondarily by TestID
                     allData.Sort((a, b) =>
                     {
-                        int testCompare = a.TestID.CompareTo(b.TestID);
-                        return testCompare != 0 ? testCompare : a.Time.CompareTo(b.Time);
+                        int timeCmp = a.Time.CompareTo(b.Time);
+                        return timeCmp != 0 ? timeCmp : a.TestID.CompareTo(b.TestID);
                     });
 
-                    // Enqueue all sorted data
-                    foreach (var data in allData)
-                    {
-                        GlobalData.DiagramQueue.Enqueue(data);
-                    }
-
+                    // Add all sorted data to DBList on UI thread
                     Dispatcher.Invoke(() =>
                     {
+                        GlobalData.DBList.AddRange(allData);
                         statusText.Text = $"All sheets loaded - {allData.Count:N0} points (plotting gradually)";
                     });
                 }
@@ -723,9 +785,7 @@ namespace DeviceAnalisys_v5
 
             var parts = tagStr.Split(';');
             if (parts.Length != 2) return;
-
-            if (!int.TryParse(parts[0], out int plotIndex) || !int.TryParse(parts[1], out int loggerIndex))
-                return;
+            if (!int.TryParse(parts[0], out int plotIndex) || !int.TryParse(parts[1], out int loggerIndex)) return;
 
             if (plotIndex < 0 || plotIndex >= loggerLists.Length) return;
             if (loggerIndex < 0 || loggerIndex >= loggerLists[plotIndex].Count) return;
@@ -746,6 +806,7 @@ namespace DeviceAnalisys_v5
             UpdateSerialNumbersFromUI();
             ClearAll_Click(null, null);
             serialPortReader.SendCommand("S");
+
             txtTestStatus.Text = "Test Status: Running (Load)";
             txtTestStatus.Foreground = new SolidColorBrush(System.Windows.Media.Colors.Yellow);
             statusText.Text = "Test Load Started | Waiting for data...";
@@ -768,6 +829,7 @@ namespace DeviceAnalisys_v5
             UpdateSerialNumbersFromUI();
             ClearAll_Click(null, null);
             serialPortReader.SendCommand("TEST:NOLOAD\n");
+
             txtTestStatus.Text = "Test Status: Running (No Load)";
             txtTestStatus.Foreground = new SolidColorBrush(System.Windows.Media.Colors.Yellow);
             statusText.Text = "Test NoLoad Started | Waiting for data...";
@@ -789,8 +851,10 @@ namespace DeviceAnalisys_v5
 
             UpdateSerialNumbersInDBList();
             excelOperation.SaveToExcel();
+
             GlobalData.DBList.Clear();
             ClearAll_Click(null, null);
+
             txtTestStatus.Text = "Test Status: Idle";
             txtTestStatus.Foreground = new SolidColorBrush(System.Windows.Media.Colors.LightGray);
             statusText.Text = "Data saved and cleared | Ready for new test";
@@ -798,13 +862,13 @@ namespace DeviceAnalisys_v5
 
         private void SaveToPdf_Click(object sender, RoutedEventArgs e)
         {
-            // TODO: Implement PDF export if needed
             MessageBox.Show("PDF export not implemented yet.", "Info", MessageBoxButton.OK, MessageBoxImage.Information);
         }
 
         private void UpdateSerialNumbersInDBList()
         {
             UpdateSerialNumbersFromUI();
+
             foreach (var data in GlobalData.DBList)
             {
                 int deviceIndex = data.TestID - 1;
@@ -851,8 +915,7 @@ namespace DeviceAnalisys_v5
             }
         }
 
-        // ────────────────────────────── Fullscreen & HD Mode Logic ──────────────────────────────
-
+        // Fullscreen & HD Mode Logic
         private void BtnFullHD_Click(object sender, RoutedEventArgs e)
         {
             if (sender is Button btn && int.TryParse(btn.Tag?.ToString(), out int deviceIndex))
@@ -863,7 +926,6 @@ namespace DeviceAnalisys_v5
                 }
                 else
                 {
-                    // FullHD mode: Full screen with window resize to 1920x1080
                     this.WindowState = WindowState.Normal;
                     this.Width = 1920;
                     this.Height = 1080;
@@ -893,10 +955,9 @@ namespace DeviceAnalisys_v5
         private void MakeFullScreen(int deviceIndex)
         {
             fullScreenDevice = deviceIndex;
-            hdModeDevice = null; // Ensure HD mode is not active
+            hdModeDevice = null;
 
             leftPanelColumn.Width = new GridLength(0);
-
             plotsGrid.Children.Clear();
             plotsGrid.RowDefinitions.Clear();
             plotsGrid.ColumnDefinitions.Clear();
@@ -928,16 +989,13 @@ namespace DeviceAnalisys_v5
 
         private void MakeHDMode(int deviceIndex)
         {
-            // Reset first to avoid conflicts
             ResetToNormalView();
 
             hdModeDevice = deviceIndex;
             fullScreenDevice = null;
 
-            // Hide left panel
             leftPanelColumn.Width = new GridLength(0);
 
-            // Convert plotsGrid to single large cell
             plotsGrid.Children.Clear();
             plotsGrid.RowDefinitions.Clear();
             plotsGrid.ColumnDefinitions.Clear();
@@ -1009,65 +1067,67 @@ namespace DeviceAnalisys_v5
 
         private Grid GetPlotGrid(int index)
         {
-            Grid result = null;
             switch (index)
             {
-                case 0:
-                    result = grid0;
-                    break;
-                case 1:
-                    result = grid1;
-                    break;
-                case 2:
-                    result = grid2;
-                    break;
-                case 3:
-                    result = grid3;
-                    break;
+                case 0: return grid0;
+                case 1: return grid1;
+                case 2: return grid2;
+                case 3: return grid3;
+                default: return null;
             }
-            return result;
         }
 
         private Button GetFullHDButton(int index)
         {
-            Button result = null;
             switch (index)
             {
-                case 0:
-                    result = btnFullHD0;
-                    break;
-                case 1:
-                    result = btnFullHD1;
-                    break;
-                case 2:
-                    result = btnFullHD2;
-                    break;
-                case 3:
-                    result = btnFullHD3;
-                    break;
+                case 0: return btnFullHD0;
+                case 1: return btnFullHD1;
+                case 2: return btnFullHD2;
+                case 3: return btnFullHD3;
+                default: return null;
             }
-            return result;
         }
 
         private Button GetHDButton(int index)
         {
-            Button result = null;
             switch (index)
             {
-                case 0:
-                    result = btnHD0;
-                    break;
-                case 1:
-                    result = btnHD1;
-                    break;
-                case 2:
-                    result = btnHD2;
-                    break;
-                case 3:
-                    result = btnHD3;
-                    break;
+                case 0: return btnHD0;
+                case 1: return btnHD1;
+                case 2: return btnHD2;
+                case 3: return btnHD3;
+                default: return null;
             }
-            return result;
+        }
+        private void BtnAnalyze_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is Button button && int.TryParse(button.Tag?.ToString(), out int deviceIndex))
+            {
+                int testId = deviceIndex + 1;
+
+                var deviceData = GlobalData.DBList.Where(d => d.TestID == testId).OrderBy(d => d.Time).ToList();
+
+                if (deviceData.Count < 100)
+                {
+                    MessageBox.Show("Not enough data for analysis.", "Insufficient Data", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                var dialog = new AnalysisTypeDialog(testId);
+                if (dialog.ShowDialog() == true)
+                {
+                    if (dialog.DoNoLoad)
+                    {
+
+                        string noLoadReport = NoLoad.Analyze(deviceData, testId);
+
+
+                        var previewWindow = new ReportPreviewWindow(noLoadReport, testId);
+                        previewWindow.ShowDialog();
+                    }
+                }
+            }
         }
     }
 }

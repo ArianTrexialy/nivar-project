@@ -9,8 +9,8 @@ namespace DeviceAnalisys_v5
     internal class ExcelOperation
     {
         /// <summary>
-        /// Loads data from Excel file and enqueues it for diagram/plotting.
-        /// Supports both formats: with serial number column and without it.
+        /// Loads data from Excel file and adds it to DBList for plotting.
+        /// Supports files with both Raw and Deg columns, or older formats.
         /// </summary>
         public void LoadExcelToDiagramQueue(string filePath)
         {
@@ -18,71 +18,89 @@ namespace DeviceAnalisys_v5
             try
             {
                 workbook = new XLWorkbook(filePath);
-                var worksheet = workbook.Worksheet(1);
 
-                int headerColumnCount = worksheet.Row(1).CellsUsed().Count();
-                bool hasSerialColumn = headerColumnCount >= 7;
-
-                int row = 2;
-                while (!worksheet.Cell(row, 1).IsEmpty())
+                foreach (var worksheet in workbook.Worksheets)
                 {
-                    if (!worksheet.Cell(row, 1).TryGetValue(out int testId))
-                        break;
+                    // Skip non-device sheets
+                    if (worksheet.Name == "Summary" ||
+                        (!worksheet.Name.StartsWith("Device_") && !worksheet.Name.StartsWith("Dev_")))
+                        continue;
 
-                    string serialNumber = string.Empty;
-                    int time = 0;
-                    double setPoint = 0, actual = 0, pitch = 0, roll = 0;
-
-                    if (hasSerialColumn)
+                    int row = 2; // Row 1 is header
+                    while (!worksheet.Cell(row, 1).IsEmpty())
                     {
+                        if (!worksheet.Cell(row, 1).TryGetValue(out int testId))
+                            break;
+
+                        string serialNumber = string.Empty;
+                        int time = 0;
+
+                        // Try to read Raw and Deg (new format with 11 columns)
+                        double setPointRaw = 0, actualRaw = 0, pitchRaw = 0, rollRaw = 0;
+                        double setPointDeg = 0, actualDeg = 0, pitchDeg = 0, rollDeg = 0;
+
                         worksheet.Cell(row, 2).TryGetValue(out serialNumber);
                         worksheet.Cell(row, 3).TryGetValue(out time);
-                        worksheet.Cell(row, 4).TryGetValue(out setPoint);
-                        worksheet.Cell(row, 5).TryGetValue(out actual);
-                        worksheet.Cell(row, 6).TryGetValue(out pitch);
-                        worksheet.Cell(row, 7).TryGetValue(out roll);
-                    }
-                    else
-                    {
-                        worksheet.Cell(row, 2).TryGetValue(out time);
-                        worksheet.Cell(row, 3).TryGetValue(out setPoint);
-                        worksheet.Cell(row, 4).TryGetValue(out actual);
-                        worksheet.Cell(row, 5).TryGetValue(out pitch);
-                        worksheet.Cell(row, 6).TryGetValue(out roll);
 
-                        int deviceIndex = testId - 1;
-                        serialNumber = (deviceIndex >= 0 && deviceIndex < MainWindow.CurrentDeviceSerials.Length)
-                            ? MainWindow.CurrentDeviceSerials[deviceIndex]
-                            : $"SN-UNKNOWN-{testId}";
-                    }
-
-                    var data = new DeviceData
-                    {
-                        TestID = testId,
-                        Time = time,
-                        SetPoint = setPoint,
-                        Actual = actual,
-                        Pitch = pitch,
-                        Roll = roll,
-                        SerialNumber = string.IsNullOrWhiteSpace(serialNumber)
-                            ? $"SN-DEV{testId:D3}"
-                            : serialNumber.Trim()
-                    };
-
-                    // Final fallback for serial number
-                    if (string.IsNullOrWhiteSpace(data.SerialNumber) ||
-                        data.SerialNumber.StartsWith("SN-DEV") ||
-                        data.SerialNumber.StartsWith("SN-UNKNOWN"))
-                    {
-                        int devIndex = testId - 1;
-                        if (devIndex >= 0 && devIndex < MainWindow.CurrentDeviceSerials.Length)
+                        // New format: Raw + Deg
+                        if (worksheet.Row(1).CellsUsed().Count() >= 11)
                         {
-                            data.SerialNumber = MainWindow.CurrentDeviceSerials[devIndex];
+                            worksheet.Cell(row, 4).TryGetValue(out setPointRaw);
+                            worksheet.Cell(row, 5).TryGetValue(out actualRaw);
+                            worksheet.Cell(row, 6).TryGetValue(out pitchRaw);
+                            worksheet.Cell(row, 7).TryGetValue(out rollRaw);
+                            worksheet.Cell(row, 8).TryGetValue(out setPointDeg);
+                            worksheet.Cell(row, 9).TryGetValue(out actualDeg);
+                            worksheet.Cell(row, 10).TryGetValue(out pitchDeg);
+                            worksheet.Cell(row, 11).TryGetValue(out rollDeg);
                         }
-                    }
+                        // Old format: only Deg
+                        else
+                        {
+                            worksheet.Cell(row, 4).TryGetValue(out setPointDeg);
+                            worksheet.Cell(row, 5).TryGetValue(out actualDeg);
+                            worksheet.Cell(row, 6).TryGetValue(out pitchDeg);
+                            worksheet.Cell(row, 7).TryGetValue(out rollDeg);
 
-                    GlobalData.DiagramQueue.Enqueue(data);
-                    row++;
+                            // Calculate Raw from Deg if needed (for compatibility)
+                            setPointRaw = setPointDeg * GlobalData.Scale;
+                            actualRaw = actualDeg * GlobalData.Scale;
+                            pitchRaw = pitchDeg * GlobalData.Scale;
+                            rollRaw = rollDeg * GlobalData.Scale;
+                        }
+
+                        var data = new DeviceData
+                        {
+                            TestID = testId,
+                            Time = time,
+                            SetPointRaw = setPointRaw,
+                            ActualRaw = actualRaw,
+                            PitchRaw = pitchRaw,
+                            RollRaw = rollRaw,
+                            SetPointDeg = setPointDeg,
+                            ActualDeg = actualDeg,
+                            PitchDeg = pitchDeg,
+                            RollDeg = rollDeg,
+                            SerialNumber = string.IsNullOrWhiteSpace(serialNumber)
+                                ? worksheet.Name.Replace("Device_", "SN-DEV")
+                                : serialNumber.Trim()
+                        };
+
+                        // Final fallback for serial number
+                        if (string.IsNullOrWhiteSpace(data.SerialNumber) ||
+                            data.SerialNumber.StartsWith("SN-DEV") ||
+                            data.SerialNumber.StartsWith("SN-UNKNOWN"))
+                        {
+                            int devIndex = testId - 1;
+                            if (devIndex >= 0 && devIndex < MainWindow.CurrentDeviceSerials.Length)
+                            {
+                                data.SerialNumber = MainWindow.CurrentDeviceSerials[devIndex];
+                            }
+                        }
+
+                        GlobalData.DBList.Add(data);
+                        row++;
+                    }
                 }
 
                 MessageBox.Show("Excel file loaded successfully.\nData is ready for plotting.",
@@ -101,12 +119,10 @@ namespace DeviceAnalisys_v5
 
         /// <summary>
         /// Reads all device data from Excel file, grouped by sheet/device.
-        /// Suitable for plotting multiple series (one series per device/sheet).
         /// </summary>
         public Dictionary<string, List<DeviceData>> ReadAllDevicesFromExcel(string filePath)
         {
             var result = new Dictionary<string, List<DeviceData>>();
-
             XLWorkbook workbook = null;
             try
             {
@@ -114,36 +130,64 @@ namespace DeviceAnalisys_v5
 
                 foreach (var worksheet in workbook.Worksheets)
                 {
-                    // Skip non-device sheets (Summary or other irrelevant sheets)
                     if (worksheet.Name == "Summary" ||
                         (!worksheet.Name.StartsWith("Device_") && !worksheet.Name.StartsWith("Dev_")))
                         continue;
 
                     string deviceKey = worksheet.Name;
                     var deviceData = new List<DeviceData>();
+                    int row = 2;
 
-                    int row = 2; // Row 1 is assumed to be header
                     while (!worksheet.Cell(row, 1).IsEmpty())
                     {
                         if (!worksheet.Cell(row, 1).TryGetValue(out int testId))
                             break;
 
-                        worksheet.Cell(row, 2).TryGetValue(out string serial);
-                        worksheet.Cell(row, 3).TryGetValue(out int time);
-                        worksheet.Cell(row, 4).TryGetValue(out double setPoint);
-                        worksheet.Cell(row, 5).TryGetValue(out double actual);
-                        worksheet.Cell(row, 6).TryGetValue(out double pitch);
-                        worksheet.Cell(row, 7).TryGetValue(out double roll);
+                        string serial = string.Empty;
+                        int time = 0;
+                        double setPointRaw = 0, actualRaw = 0, pitchRaw = 0, rollRaw = 0;
+                        double setPointDeg = 0, actualDeg = 0, pitchDeg = 0, rollDeg = 0;
+
+                        worksheet.Cell(row, 2).TryGetValue(out serial);
+                        worksheet.Cell(row, 3).TryGetValue(out time);
+
+                        if (worksheet.Row(1).CellsUsed().Count() >= 11)
+                        {
+                            worksheet.Cell(row, 4).TryGetValue(out setPointRaw);
+                            worksheet.Cell(row, 5).TryGetValue(out actualRaw);
+                            worksheet.Cell(row, 6).TryGetValue(out pitchRaw);
+                            worksheet.Cell(row, 7).TryGetValue(out rollRaw);
+                            worksheet.Cell(row, 8).TryGetValue(out setPointDeg);
+                            worksheet.Cell(row, 9).TryGetValue(out actualDeg);
+                            worksheet.Cell(row, 10).TryGetValue(out pitchDeg);
+                            worksheet.Cell(row, 11).TryGetValue(out rollDeg);
+                        }
+                        else
+                        {
+                            worksheet.Cell(row, 4).TryGetValue(out setPointDeg);
+                            worksheet.Cell(row, 5).TryGetValue(out actualDeg);
+                            worksheet.Cell(row, 6).TryGetValue(out pitchDeg);
+                            worksheet.Cell(row, 7).TryGetValue(out rollDeg);
+
+                            setPointRaw = setPointDeg * GlobalData.Scale;
+                            actualRaw = actualDeg * GlobalData.Scale;
+                            pitchRaw = pitchDeg * GlobalData.Scale;
+                            rollRaw = rollDeg * GlobalData.Scale;
+                        }
 
                         var dataPoint = new DeviceData
                         {
                             TestID = testId,
-                            SerialNumber = string.IsNullOrWhiteSpace(serial) ? deviceKey : serial.Trim(),
                             Time = time,
-                            SetPoint = setPoint,
-                            Actual = actual,
-                            Pitch = pitch,
-                            Roll = roll
+                            SetPointRaw = setPointRaw,
+                            ActualRaw = actualRaw,
+                            PitchRaw = pitchRaw,
+                            RollRaw = rollRaw,
+                            SetPointDeg = setPointDeg,
+                            ActualDeg = actualDeg,
+                            PitchDeg = pitchDeg,
+                            RollDeg = rollDeg,
+                            SerialNumber = string.IsNullOrWhiteSpace(serial) ? deviceKey : serial.Trim()
                         };
 
                         deviceData.Add(dataPoint);
@@ -152,7 +196,6 @@ namespace DeviceAnalisys_v5
 
                     if (deviceData.Count > 0)
                     {
-                        // Sort data by time (just in case)
                         deviceData.Sort((a, b) => a.Time.CompareTo(b.Time));
                         result[deviceKey] = deviceData;
                     }
@@ -174,6 +217,7 @@ namespace DeviceAnalisys_v5
 
         /// <summary>
         /// Saves all collected data to Excel file, with each device in its own sheet.
+        /// Stores both Raw and Deg values.
         /// </summary>
         public void SaveToExcel(string filePath = null)
         {
@@ -194,10 +238,8 @@ namespace DeviceAnalisys_v5
                         FileName = $"TestData_{DateTime.Now:yyyyMMdd_HHmmss}.xlsx",
                         DefaultExt = ".xlsx"
                     };
-
                     if (saveDialog.ShowDialog() != true)
                         return;
-
                     filePath = saveDialog.FileName;
                 }
 
@@ -231,16 +273,20 @@ namespace DeviceAnalisys_v5
 
                         var ws = workbook.Worksheets.Add(sheetName);
 
-                        // Headers
+                        // Headers (Raw + Deg)
                         ws.Cell(1, 1).Value = "TestID";
                         ws.Cell(1, 2).Value = "Serial Number";
                         ws.Cell(1, 3).Value = "Time";
-                        ws.Cell(1, 4).Value = "SetPoint";
-                        ws.Cell(1, 5).Value = "Actual";
-                        ws.Cell(1, 6).Value = "Pitch";
-                        ws.Cell(1, 7).Value = "Roll";
+                        ws.Cell(1, 4).Value = "SetPointRaw";
+                        ws.Cell(1, 5).Value = "ActualRaw";
+                        ws.Cell(1, 6).Value = "PitchRaw";
+                        ws.Cell(1, 7).Value = "RollRaw";
+                        ws.Cell(1, 8).Value = "SetPointDeg";
+                        ws.Cell(1, 9).Value = "ActualDeg";
+                        ws.Cell(1, 10).Value = "PitchDeg";
+                        ws.Cell(1, 11).Value = "RollDeg";
 
-                        var headerRange = ws.Range("A1:G1");
+                        var headerRange = ws.Range("A1:K1");
                         headerRange.Style.Font.Bold = true;
                         headerRange.Style.Fill.BackgroundColor = XLColor.FromArgb(0, 122, 204);
                         headerRange.Style.Font.FontColor = XLColor.White;
@@ -253,14 +299,18 @@ namespace DeviceAnalisys_v5
                             ws.Cell(row, 1).Value = data.TestID;
                             ws.Cell(row, 2).Value = data.SerialNumber;
                             ws.Cell(row, 3).Value = data.Time;
-                            ws.Cell(row, 4).Value = data.SetPoint;
-                            ws.Cell(row, 5).Value = data.Actual;
-                            ws.Cell(row, 6).Value = data.Pitch;
-                            ws.Cell(row, 7).Value = data.Roll;
+                            ws.Cell(row, 4).Value = data.SetPointRaw;
+                            ws.Cell(row, 5).Value = data.ActualRaw;
+                            ws.Cell(row, 6).Value = data.PitchRaw;
+                            ws.Cell(row, 7).Value = data.RollRaw;
+                            ws.Cell(row, 8).Value = data.SetPointDeg;
+                            ws.Cell(row, 9).Value = data.ActualDeg;
+                            ws.Cell(row, 10).Value = data.PitchDeg;
+                            ws.Cell(row, 11).Value = data.RollDeg;
                             row++;
                         }
 
-                        ws.Columns("A:G").AdjustToContents();
+                        ws.Columns("A:K").AdjustToContents();
                     }
 
                     // Summary sheet
